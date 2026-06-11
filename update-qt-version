@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+pkgbuild=PKGBUILD
+srcinfo=.SRCINFO
+qt_module_repo=https://code.qt.io/qt/qtinterfaceframework
+
+usage() {
+  printf 'Usage: %s [qt-version|qt6-base-package-version]\n' "${0##*/}"
+  printf '\n'
+  printf 'Without an argument, reads the current qt6-base version from pacman -Si.\n'
+  printf 'Examples:\n'
+  printf '  %s\n' "${0##*/}"
+  printf '  %s 6.11.1\n' "${0##*/}"
+  printf '  %s 6.11.1-1\n' "${0##*/}"
+}
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf 'error: required command not found: %s\n' "$1" >&2
+    exit 1
+  fi
+}
+
+qt_version_from_pacman() {
+  local package_version
+
+  package_version=$(
+    LC_ALL=C pacman -Si qt6-base |
+      awk -F ':' '$1 ~ /^Version[[:space:]]*$/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }'
+  )
+
+  if [[ -z "$package_version" ]]; then
+    printf 'error: could not read qt6-base version from pacman -Si\n' >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$package_version"
+}
+
+normalize_qt_version() {
+  local version=$1
+
+  version=${version%-*}
+  version=${version#*:}
+
+  if [[ -z "$version" || "$version" =~ [[:space:]] ]]; then
+    printf 'error: invalid Qt version: %s\n' "$1" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$version"
+}
+
+verify_qt_tag() {
+  local version=$1
+  local output status
+
+  require_cmd git
+
+  set +e
+  output=$(git ls-remote --exit-code --tags "$qt_module_repo" "refs/tags/v$version" 2>&1)
+  status=$?
+  set -e
+
+  if (( status == 2 )); then
+    printf 'error: %s does not contain tag v%s\n' "$qt_module_repo" "$version" >&2
+    exit 1
+  fi
+
+  if (( status != 0 )); then
+    printf 'error: could not verify tag v%s in %s\n' "$version" "$qt_module_repo" >&2
+    printf '%s\n' "$output" >&2
+    exit 1
+  fi
+}
+
+update_pkgbuild() {
+  local version=$1
+
+  sed -i -E \
+    -e "s/^_pkgver=.*/_pkgver=$version/" \
+    -e 's/^pkgrel=.*/pkgrel=1/' \
+    -e "s/^sha256sums=.*/sha256sums=('SKIP')/" \
+    "$pkgbuild"
+}
+
+main() {
+  local package_version qt_version
+
+  require_cmd awk
+  require_cmd makepkg
+  require_cmd sed
+
+  case "${1:-}" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    "")
+      require_cmd pacman
+      package_version=$(qt_version_from_pacman)
+      ;;
+    *)
+      package_version=$1
+      ;;
+  esac
+
+  qt_version=$(normalize_qt_version "$package_version")
+  verify_qt_tag "$qt_version"
+  update_pkgbuild "$qt_version"
+  makepkg --printsrcinfo > "$srcinfo"
+
+  printf 'Updated %s and %s to Qt %s\n' "$pkgbuild" "$srcinfo" "$qt_version"
+}
+
+main "$@"
