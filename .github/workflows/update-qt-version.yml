@@ -73,14 +73,29 @@ jobs:
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Open pull request
+      - name: Configure SSH for AUR
+        if: steps.package.outputs.changed == 'true' && secrets.AUR_SSH_PRIVATE_KEY != ''
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+
+      - name: Trust AUR host
+        if: steps.package.outputs.changed == 'true' && secrets.AUR_SSH_PRIVATE_KEY != ''
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts
+
+      - name: Publish and open pull request
         if: steps.package.outputs.changed == 'true'
         env:
           BRANCH: automation/update-qt-version
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.package.outputs.version }}
+          PUSH_AUR: ${{ secrets.AUR_SSH_PRIVATE_KEY != '' }}
         run: |
           set -euo pipefail
+
+          export AUR_REMOTE='ssh://aur@aur.archlinux.org/qt6-interfaceframework.git'
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -91,6 +106,19 @@ jobs:
 
           git fetch origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" || true
           git push --force-with-lease origin HEAD:"$BRANCH"
+
+          if [[ "$PUSH_AUR" == "true" ]]; then
+            if git remote get-url aur >/dev/null 2>&1; then
+              git remote set-url aur "$AUR_REMOTE"
+            else
+              git remote add aur "$AUR_REMOTE"
+            fi
+
+            git push --force aur "$BRANCH:master"
+            echo "Pushed update to AUR."
+          else
+            echo "Skipping AUR push: AUR_SSH_PRIVATE_KEY not configured."
+          fi
 
           body=$(mktemp)
           {
